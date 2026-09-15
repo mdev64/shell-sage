@@ -1,0 +1,94 @@
+name: Release & Update Tap
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*" # Matches v1.0.0, v1.0.1-rc1, etc.
+
+permissions:
+  contents: write # Grants permissions to create the release and upload assets
+
+jobs:
+  build-and-release:
+    runs-on: macos-14 # Native Apple Silicon runner
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Build Release Binary
+        run: cargo build --release --bin sage
+
+      - name: Package Binary & Calculate Checksum
+        id: package
+        run: |
+          # Extract tag from GITHUB_REF (e.g., refs/tags/v1.0.1 -> v1.0.1)
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          ASSET_NAME="sage-${TAG}-aarch64-apple-darwin.tar.gz"
+
+          # Archive the binary
+          tar -czf "$ASSET_NAME" -C target/release sage
+
+          # Calculate SHA-256 hash
+          HASH=$(shasum -a 256 "$ASSET_NAME" | cut -d ' ' -f 1)
+
+          # Export variables for downstream steps
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "asset_name=${ASSET_NAME}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${HASH}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release & Upload Asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.package.outputs.tag }}" \
+            "${{ steps.package.outputs.asset_name }}" \
+            --title "${{ steps.package.outputs.tag }}" \
+            --generate-notes
+
+      - name: Checkout Tap Repository
+        uses: actions/checkout@v4
+        with:
+          repository: "mdev64/homebrew-tap"
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: "homebrew-tap"
+
+      - name: Update Formula in Tap
+        run: |
+          cd homebrew-tap
+
+          cat <<EOF > Formula/shell-sage.rb
+          class ShellSage < Formula
+            desc "An offline AI CLI assistant for Apple Silicon Macs"
+            homepage "https://github.com/mdev64/shell-sage"
+            version "${{ steps.package.outputs.version }}"
+
+            if OS.mac? && Hardware::CPU.arm?
+              url "https://github.com/mdev64/shell-sage/releases/download/${{ steps.package.outputs.tag }}/${{ steps.package.outputs.asset_name }}"
+              sha256 "${{ steps.package.outputs.sha256 }}"
+            end
+
+            def install
+              bin.install "sage"
+            end
+
+            test do
+              system "#{bin}/sage", "--help"
+            end
+          end
+          EOF
+
+      - name: Commit and Push to Tap
+        run: |
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/shell-sage.rb
+          git commit -m "chore(release): bump shell-sage to ${{ steps.package.outputs.version }}"
+          git push origin main
