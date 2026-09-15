@@ -1,3 +1,7 @@
+# Rust build output
+/target
+*.tar.gz
+
 # operating system files
 .DS_Store
 Thumbs.db
@@ -7,3 +11,14 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# AI Assistant files
+.claude/
+.copilot/
+
+# Rust backup files
+**/*.rs.bk
+
+# Core dumps
+core
+*.core
