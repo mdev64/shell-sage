@@ -43,14 +43,20 @@ jobs:
           echo "asset_name=${ASSET_NAME}" >> "$GITHUB_OUTPUT"
           echo "sha256=${HASH}" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release & Upload Asset
+      - name: Create or Update GitHub Release & Upload Asset
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ steps.package.outputs.tag }}" \
-            "${{ steps.package.outputs.asset_name }}" \
-            --title "${{ steps.package.outputs.tag }}" \
-            --generate-notes
+          TAG="${{ steps.package.outputs.tag }}"
+          ASSET="${{ steps.package.outputs.asset_name }}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ASSET" --clobber
+          else
+            gh release create "$TAG" "$ASSET" \
+              --title "$TAG" \
+              --generate-notes
+          fi
 
       - name: Checkout Tap Repository
         uses: actions/checkout@v4
