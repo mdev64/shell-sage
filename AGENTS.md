@@ -1,6 +1,6 @@
-# CLAUDE.md
+# Agents.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI coding agents when working with code in this repository.
 
 ## Overview
 
@@ -31,7 +31,7 @@ Flow in `main.rs`: parse args with clap (`Cli::try_parse`; `--config` short-circ
 - `src/setup.rs` — the interactive `sage --config` wizard (dialoguer): detects RAM via `sysctl`, recommends E2B (<16 GB) or E4B (≥16 GB), confirms shell against `$SHELL` with a pick-list, and asks about hints + clipboard, then saves the config. Also triggers model download and removes the old model.
 - `src/downloader.rs` — `ensure_model_exists` streams the model download with a progress bar; verifies the local file size against the server's content-length (HEAD) so interrupted downloads are re-downloaded. `remove_other_models` deletes whichever of E2B/E4B isn't in use.
 - `src/engine.rs` — `InferenceEngine` wraps `LlamaBackend` + `LlamaModel`. `new()` loads the model; `generate()` decodes the prompt into a batch, then loops sampling until `max_tokens` or an end-of-generation token. A persistent `LlamaSampler::penalties` (repeat 1.1, last 64, freq/present 0) is seeded with the prompt tokens and fed each generated token via `accept` to suppress the small model's repetition loops before the greedy pick.
-- `src/prompt.rs` — Gemma-format (`<start_of_turn>...`) instruction prompts. `format_prompt` embeds the current OS and the *configured* shell and asks for a raw shell command (contract: "raw shell command on line 1, `# `-prefixed explanation on later lines"); `format_explain_prompt` asks for a plain-language breakdown of a given command; `format_answer_prompt` asks for a general-knowledge answer to a question.
+- `src/prompt.rs` — Gemma-format (`<start_of_turn>...`) instruction prompts. `format_prompt` embeds the current OS and the _configured_ shell and asks for a raw shell command (contract: "raw shell command on line 1, `# `-prefixed explanation on later lines"); `format_explain_prompt` asks for a plain-language breakdown of a given command; `format_answer_prompt` asks for a general-knowledge answer to a question.
 
 ## Key dependencies
 
