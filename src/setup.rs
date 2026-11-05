@@ -1,124 +1,154 @@
-use crate::config;
-use crate::downloader;
+use crate::config::{self, AppConfig, ModelConfig};
+use crate::{downloader, ui};
 use anyhow::Result;
 use dialoguer::theme::ColorfulTheme;
 use dialoguer::{Confirm, Input, Select};
 use std::env;
 use std::process::Command;
 
+/// Machines with at least this much RAM get the larger model recommended.
+const LARGE_MODEL_MIN_RAM_GB: u64 = 16;
+
+const KNOWN_SHELLS: [&str; 7] = [
+    "/bin/zsh",
+    "/bin/bash",
+    "/bin/sh",
+    "/bin/tcsh",
+    "/bin/ksh",
+    "/opt/homebrew/bin/fish",
+    "/usr/local/bin/fish",
+];
+
+/// Runs the interactive `sage --config` wizard and saves the result.
 pub async fn run_wizard() -> Result<()> {
     let theme = ColorfulTheme::default();
+    println!("\n{}", ui::heading("=== Shell Sage Config ==="));
 
-    println!("\n\x1b[1;36m=== Shell Sage Config ===\x1b[0m");
+    let model = select_model(&theme)?;
+    downloader::prepare_model(model).await?;
 
-    println!("\n\x1b[1mStep 1/4 — Select a model\x1b[0m");
-    let ram_gb = detect_ram_gb();
-    let recommended = if ram_gb >= 16 { "E4B" } else { "E2B" };
-    println!("Detected RAM: \x1b[1m{} GB\x1b[0m", ram_gb);
-    println!(
-        "Recommended model for {} GB: \x1b[1m{}\x1b[0m ({})",
-        ram_gb,
-        recommended,
-        if recommended == "E4B" {
-            "more capable, higher memory"
-        } else {
-            "faster, lower memory"
-        }
-    );
+    let shell = select_shell(&theme)?;
+    let show_hints = ask_show_hints(&theme)?;
 
-    let model_options = [
-        "E2B — faster, lower RAM footprint",
-        "E4B — more capable, higher RAM",
-    ];
-    let model_default = if recommended == "E4B" { 1 } else { 0 };
-    let model_sel = Select::with_theme(&theme)
-        .with_prompt("Which model should Sage use?")
-        .default(model_default)
-        .items(model_options)
-        .interact()?;
-    let model = if model_sel == 0 { "E2B" } else { "E4B" };
-
-    let model_config = config::get_model_config(model)?;
-    let model_path = config::get_model_path(model_config)?;
-    if model_path.exists() {
-        println!("Model already cached: {}", model_path.display());
-    } else {
-        println!(
-            "Model not found locally — downloading {} ...",
-            model_config.expected_filename
-        );
-    }
-    downloader::ensure_model_exists(model_config.download_url, &model_path).await?;
-    downloader::remove_other_models(model_config)?;
-
-    println!("\n\x1b[1mStep 2/4 — Default shell\x1b[0m");
-    let detected_shell = detect_shell();
-    let shells = [
-        "/bin/zsh",
-        "/bin/bash",
-        "/bin/sh",
-        "/bin/tcsh",
-        "/bin/ksh",
-        "/opt/homebrew/bin/fish",
-        "/usr/local/bin/fish",
-        "Other (enter a custom shell path)",
-    ];
-    let default_shell_idx = shells
-        .iter()
-        .position(|s| *s == detected_shell)
-        .unwrap_or(7);
-    let shell_sel = Select::with_theme(&theme)
-        .with_prompt(format!(
-            "Detected shell: {} — confirm or pick another",
-            detected_shell
-        ))
-        .default(default_shell_idx)
-        .items(shells)
-        .interact()?;
-    let shell = if shell_sel == 7 {
-        Input::<String>::with_theme(&theme)
-            .with_prompt("Enter the full path to your shell")
-            .default(detected_shell.clone())
-            .interact()?
-    } else {
-        shells[shell_sel].to_string()
-    };
-
-    println!("\n\x1b[1mStep 3/4 — Code hints\x1b[0m");
-    println!("Example of the hints Sage prints after the command:");
-    println!();
-    println!("\x1b[1;32m$ find . -name \"*.mp4\" -type f\x1b[0m");
-    println!("\x1b[90m# find: Searches the filesystem for files.\x1b[0m");
-    println!("\x1b[90m# -name \"*.mp4\": Match files ending in .mp4.\x1b[0m");
-    println!("\x1b[90m# -type f: Only match regular files, not directories.\x1b[0m");
-    println!();
-    let show_hints = Confirm::with_theme(&theme)
-        .with_prompt("Show code hints like these after the command?")
-        .default(true)
-        .interact()?;
-
-    println!("\n\x1b[1mStep 4/4 — Clipboard\x1b[0m");
+    step(4, "Clipboard");
     let auto_copy = Confirm::with_theme(&theme)
         .with_prompt("Automatically copy the command to the clipboard?")
         .default(true)
         .interact()?;
 
-    config::save_config(&config::AppConfig {
-        model: model.to_string(),
+    config::save_config(&AppConfig {
+        model: model.name.to_string(),
         shell,
         show_hints,
         auto_copy,
     })?;
 
-    println!();
     println!(
-        "\x1b[1;32m✓ Configuration saved\x1b[0m to {}",
+        "\n{} to {}",
+        ui::success("✓ Configuration saved"),
         config::config_file_path()?.display()
     );
     println!("Run `sage \"<your query>\"` to start using it.");
     Ok(())
 }
 
+fn step(n: u8, title: &str) {
+    println!("\n{}", ui::bold(format!("Step {n}/4 — {title}")));
+}
+
+fn select_model(theme: &ColorfulTheme) -> Result<&'static ModelConfig> {
+    step(1, "Select a model");
+    let ram_gb = detect_ram_gb();
+    let recommended = recommended_model(ram_gb);
+    println!("Detected RAM: {}", ui::bold(format!("{ram_gb} GB")));
+    println!(
+        "Recommended model for {ram_gb} GB: {} ({})",
+        ui::bold(recommended.name),
+        recommended.summary
+    );
+
+    let items: Vec<String> = config::ALL_MODELS
+        .iter()
+        .map(|m| format!("{} — {}", m.name, m.summary))
+        .collect();
+    let default = config::ALL_MODELS
+        .iter()
+        .position(|m| m.name == recommended.name)
+        .unwrap_or(0);
+    let selected = Select::with_theme(theme)
+        .with_prompt("Which model should Sage use?")
+        .default(default)
+        .items(&items)
+        .interact()?;
+    let model = config::ALL_MODELS[selected];
+
+    let path = config::get_model_path(model)?;
+    if path.exists() {
+        println!("Model already cached: {}", path.display());
+    }
+    Ok(model)
+}
+
+fn select_shell(theme: &ColorfulTheme) -> Result<String> {
+    step(2, "Default shell");
+    let detected = detect_shell();
+
+    let mut items: Vec<&str> = KNOWN_SHELLS.to_vec();
+    items.push("Other (enter a custom shell path)");
+    let other_idx = KNOWN_SHELLS.len();
+
+    let default = KNOWN_SHELLS
+        .iter()
+        .position(|s| *s == detected)
+        .unwrap_or(other_idx);
+    let selected = Select::with_theme(theme)
+        .with_prompt(format!(
+            "Detected shell: {detected} — confirm or pick another"
+        ))
+        .default(default)
+        .items(&items)
+        .interact()?;
+
+    if selected == other_idx {
+        Ok(Input::<String>::with_theme(theme)
+            .with_prompt("Enter the full path to your shell")
+            .default(detected)
+            .interact()?)
+    } else {
+        Ok(KNOWN_SHELLS[selected].to_string())
+    }
+}
+
+fn ask_show_hints(theme: &ColorfulTheme) -> Result<bool> {
+    step(3, "Code hints");
+    println!("Example of the hints Sage prints after the command:\n");
+    println!("{}", ui::success("$ find . -name \"*.mp4\" -type f"));
+    println!("{}", ui::dim("# find: Searches the filesystem for files."));
+    println!(
+        "{}",
+        ui::dim("# -name \"*.mp4\": Match files ending in .mp4.")
+    );
+    println!(
+        "{}",
+        ui::dim("# -type f: Only match regular files, not directories.")
+    );
+    println!();
+    Ok(Confirm::with_theme(theme)
+        .with_prompt("Show code hints like these after the command?")
+        .default(true)
+        .interact()?)
+}
+
+/// Picks the model suited to a machine with `ram_gb` of memory.
+pub fn recommended_model(ram_gb: u64) -> &'static ModelConfig {
+    if ram_gb >= LARGE_MODEL_MIN_RAM_GB {
+        &config::GEMMA_E4B_CONFIG
+    } else {
+        &config::GEMMA_E2B_CONFIG
+    }
+}
+
+/// Total RAM in whole GB via `sysctl`, falling back to 8 if unavailable.
 pub fn detect_ram_gb() -> u64 {
     Command::new("sysctl")
         .args(["-n", "hw.memsize"])
@@ -130,6 +160,7 @@ pub fn detect_ram_gb() -> u64 {
         .unwrap_or(8)
 }
 
+/// The user's login shell from `$SHELL`, defaulting to `/bin/zsh`.
 pub fn detect_shell() -> String {
     env::var("SHELL")
         .map(|s| s.trim().to_string())

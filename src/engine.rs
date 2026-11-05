@@ -7,7 +7,15 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::data_array::LlamaTokenDataArray;
+use std::num::NonZeroU32;
 use std::path::Path;
+
+/// Context window (prompt + generated tokens).
+pub const CONTEXT_SIZE: u32 = 1024;
+
+// Repetition-penalty settings that keep the small models out of loops.
+const PENALTY_LAST_N: i32 = 64;
+const PENALTY_REPEAT: f32 = 1.1;
 
 pub struct InferenceEngine {
     backend: LlamaBackend,
@@ -22,42 +30,45 @@ impl InferenceEngine {
         Ok(Self { backend, model })
     }
 
+    /// Greedily generates a completion for `prompt`, stopping at an
+    /// end-of-generation token or once `max_tokens` total positions
+    /// (prompt included) have been used.
     pub fn generate(&self, prompt: &str, max_tokens: usize) -> Result<String> {
-        let ctx_params = LlamaContextParams::default()
-            .with_n_ctx(Some(std::num::NonZeroU32::new(1024).unwrap()));
+        let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(CONTEXT_SIZE));
         let mut ctx = self.model.new_context(&self.backend, ctx_params)?;
 
         let tokens = self.model.str_to_token(prompt, AddBos::Always)?;
-        let mut batch = LlamaBatch::new(1024, 1);
-
+        let mut batch = LlamaBatch::new(CONTEXT_SIZE as usize, 1);
+        let last = tokens.len().saturating_sub(1);
         for (i, &token) in tokens.iter().enumerate() {
-            batch.add(token, i as i32, &[0], i == tokens.len() - 1)?;
+            batch.add(token, i as i32, &[0], i == last)?;
         }
         ctx.decode(&mut batch)?;
 
-        let mut penalty = LlamaSampler::penalties(64, 1.1, 0.0, 0.0);
+        let mut penalty = LlamaSampler::penalties(PENALTY_LAST_N, PENALTY_REPEAT, 0.0, 0.0);
         penalty.accept_many(tokens.iter().copied());
 
+        // One decoder for the whole stream so multi-byte UTF-8 characters
+        // split across tokens are reassembled correctly.
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut output = String::new();
         let mut n_cur = batch.n_tokens();
 
         while (n_cur as usize) < max_tokens {
-            let candidates = ctx.candidates_ith(batch.n_tokens() - 1);
-            let mut candidates_p = LlamaTokenDataArray::from_iter(candidates, false);
-            candidates_p.apply_sampler(&penalty);
-            let token = candidates_p.sample_token_greedy();
+            let mut candidates =
+                LlamaTokenDataArray::from_iter(ctx.candidates_ith(batch.n_tokens() - 1), false);
+            candidates.apply_sampler(&penalty);
+            let token = candidates.sample_token_greedy();
 
             if self.model.is_eog_token(token) {
                 break;
             }
-
             penalty.accept(token);
-
-            let mut decoder = encoding_rs::UTF_8.new_decoder();
-            let piece = self
-                .model
-                .token_to_piece(token, &mut decoder, false, None)?;
-            output.push_str(&piece);
+            output.push_str(
+                &self
+                    .model
+                    .token_to_piece(token, &mut decoder, false, None)?,
+            );
 
             batch.clear();
             batch.add(token, n_cur, &[0], true)?;

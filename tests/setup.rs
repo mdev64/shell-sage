@@ -12,3 +12,12 @@ fn shell_detection_returns_absolute_path() {
     assert!(!shell.is_empty());
     assert!(shell.starts_with('/'));
 }
+
+#[test]
+fn recommends_larger_model_on_16gb_or_more() {
+    use sage::setup::recommended_model;
+    assert_eq!(recommended_model(8).name, "E2B");
+    assert_eq!(recommended_model(15).name, "E2B");
+    assert_eq!(recommended_model(16).name, "E4B");
+    assert_eq!(recommended_model(64).name, "E4B");
+}

@@ -4,3 +4,4 @@ pub mod engine;
 pub mod output;
 pub mod prompt;
 pub mod setup;
+pub mod ui;

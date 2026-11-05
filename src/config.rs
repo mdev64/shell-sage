@@ -1,23 +1,37 @@
-use anyhow::{Context, Result, bail};
+use crate::ui;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// A downloadable model that Sage can run.
 pub struct ModelConfig {
+    /// Short name persisted in `config.json` (e.g. `"E2B"`).
+    pub name: &'static str,
+    /// One-line description shown in the setup wizard.
+    pub summary: &'static str,
     pub download_url: &'static str,
     pub expected_filename: &'static str,
 }
 
 pub const GEMMA_E2B_CONFIG: ModelConfig = ModelConfig {
+    name: "E2B",
+    summary: "faster, lower RAM footprint",
     download_url: "https://models.r2-cf.mdev64.com/gemma4/gemma-4-E2B-it-Q4_K_M.gguf",
     expected_filename: "gemma-4-E2B-it-Q4_K_M.gguf",
 };
 
 pub const GEMMA_E4B_CONFIG: ModelConfig = ModelConfig {
+    name: "E4B",
+    summary: "more capable, higher RAM",
     download_url: "https://models.r2-cf.mdev64.com/gemma4/gemma-4-E4B-it-Q4_K_M.gguf",
     expected_filename: "gemma-4-E4B-it-Q4_K_M.gguf",
 };
 
+/// Every supported model, smallest first.
+pub const ALL_MODELS: [&ModelConfig; 2] = [&GEMMA_E2B_CONFIG, &GEMMA_E4B_CONFIG];
+
+/// User preferences persisted to `~/.cache/sage/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub model: String,
@@ -27,26 +41,25 @@ pub struct AppConfig {
 }
 
 pub fn get_model_config(name: &str) -> Result<&'static ModelConfig> {
-    match name {
-        "E2B" => Ok(&GEMMA_E2B_CONFIG),
-        "E4B" => Ok(&GEMMA_E4B_CONFIG),
-        other => bail!("Unknown model '{other}' in configuration. Run `sage --config` to fix it."),
-    }
+    ALL_MODELS
+        .into_iter()
+        .find(|m| m.name == name)
+        .with_context(|| {
+            format!("Unknown model '{name}' in configuration. Run `sage --config` to fix it.")
+        })
 }
 
+/// Returns `~/.cache/sage`, creating it if needed.
 pub fn get_cache_dir() -> Result<PathBuf> {
     let path = dirs::home_dir()
         .context("Could not find home directory")?
         .join(".cache/sage");
-    if !path.exists() {
-        fs::create_dir_all(&path)?;
-    }
+    fs::create_dir_all(&path).with_context(|| format!("Failed to create {}", path.display()))?;
     Ok(path)
 }
 
-pub fn get_model_path(config: &ModelConfig) -> Result<PathBuf> {
-    let cache_dir = get_cache_dir()?;
-    Ok(cache_dir.join(config.expected_filename))
+pub fn get_model_path(model: &ModelConfig) -> Result<PathBuf> {
+    Ok(get_cache_dir()?.join(model.expected_filename))
 }
 
 pub fn config_file_path() -> Result<PathBuf> {
@@ -57,6 +70,9 @@ pub fn load_config() -> Result<Option<AppConfig>> {
     load_config_from(&config_file_path()?)
 }
 
+/// Loads the config at `path`. A missing, unreadable, or invalid file yields
+/// `None` (with a warning for the latter two) so the caller can prompt the
+/// user to run `sage --config`.
 pub fn load_config_from(path: &Path) -> Result<Option<AppConfig>> {
     if !path.exists() {
         return Ok(None);
@@ -64,7 +80,10 @@ pub fn load_config_from(path: &Path) -> Result<Option<AppConfig>> {
     let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(e) => {
-            eprintln!("\x1b[90mWarning: could not read config ({}).\x1b[0m", e);
+            eprintln!(
+                "{}",
+                ui::dim(format!("Warning: could not read config ({e})."))
+            );
             return Ok(None);
         }
     };
@@ -72,8 +91,10 @@ pub fn load_config_from(path: &Path) -> Result<Option<AppConfig>> {
         Ok(cfg) => Ok(Some(cfg)),
         Err(e) => {
             eprintln!(
-                "\x1b[90mWarning: config is invalid ({}). Run `sage --config` to recreate it.\x1b[0m",
-                e
+                "{}",
+                ui::dim(format!(
+                    "Warning: config is invalid ({e}). Run `sage --config` to recreate it."
+                ))
             );
             Ok(None)
         }

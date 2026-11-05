@@ -99,3 +99,13 @@ fn invalid_json_is_none() {
     assert!(config::load_config_from(&path).unwrap().is_none());
     fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn every_model_resolves_by_its_name() {
+    for model in config::ALL_MODELS {
+        assert_eq!(
+            config::get_model_config(model.name).unwrap().name,
+            model.name
+        );
+    }
+}

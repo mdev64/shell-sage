@@ -1,9 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::error::{ContextKind, ErrorKind};
 use clap::{ArgAction, Parser};
-use indicatif::{ProgressBar, ProgressStyle};
-use sage::{config, downloader, engine, output, prompt, setup};
-use std::time::Duration;
+use sage::config::{self, AppConfig};
+use sage::{downloader, engine, output, prompt, setup, ui};
+
+/// Upper bound on prompt + generated tokens for a single run.
+const MAX_TOKENS: usize = engine::CONTEXT_SIZE as usize;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -56,118 +58,114 @@ enum Mode {
     Answer,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
-        Err(err) if err.kind() == ErrorKind::UnknownArgument => {
-            let bad = err
-                .get(ContextKind::InvalidArg)
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            eprintln!(
-                "\x1b[1;31msage:\x1b[0m unknown command or option \x1b[1m{}\x1b[0m",
-                bad
-            );
-            eprintln!();
-            eprintln!("Run \x1b[1msage --help\x1b[0m to see all available commands.");
-            std::process::exit(2);
+impl Cli {
+    /// Parses argv, reporting unknown flags as "unknown command" and exiting.
+    fn parse_or_exit() -> Self {
+        match Self::try_parse() {
+            Ok(cli) => cli,
+            Err(err) if err.kind() == ErrorKind::UnknownArgument => {
+                let bad = err
+                    .get(ContextKind::InvalidArg)
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                eprintln!(
+                    "{} unknown command or option {}\n",
+                    ui::error("sage:"),
+                    ui::bold(bad)
+                );
+                eprintln!(
+                    "Run {} to see all available commands.",
+                    ui::bold("sage --help")
+                );
+                std::process::exit(2);
+            }
+            Err(err) => err.exit(),
         }
-        Err(err) => err.exit(),
-    };
-
-    if cli.config {
-        setup::run_wizard().await?;
-        return Ok(());
     }
 
-    let (mode, input) = if let Some(parts) = cli.explain {
-        (Mode::Explain, parts.join(" "))
-    } else if let Some(parts) = cli.answer {
-        (Mode::Answer, parts.join(" "))
-    } else {
-        (Mode::Command, cli.query.join(" "))
-    };
+    /// The requested mode and its joined input text.
+    fn into_mode(self) -> (Mode, String) {
+        match (self.explain, self.answer) {
+            (Some(parts), _) => (Mode::Explain, parts.join(" ")),
+            (_, Some(parts)) => (Mode::Answer, parts.join(" ")),
+            _ => (Mode::Command, self.query.join(" ")),
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse_or_exit();
+    if cli.config {
+        return setup::run_wizard().await;
+    }
+    let (mode, input) = cli.into_mode();
 
     let Some(app_config) = config::load_config()? else {
-        eprintln!("\x1b[1;33mNo configuration found.\x1b[0m");
+        eprintln!("{}", ui::warning("No configuration found."));
         eprintln!("Please run `sage --config` once to pick a model, shell, and preferences.");
         return Ok(());
     };
 
     let model_config = config::get_model_config(&app_config.model)?;
-    let model_path = config::get_model_path(model_config)?;
-    downloader::ensure_model_exists(model_config.download_url, &model_path).await?;
-    downloader::remove_other_models(model_config)?;
+    let model_path = downloader::prepare_model(model_config).await?;
 
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::default_spinner()
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-            .template("{spinner:.green} {msg}")
-            .unwrap(),
-    );
-    spinner.set_message("Thinking...");
-    spinner.enable_steady_tick(Duration::from_millis(80));
+    let spinner = ui::spinner("Thinking...");
     let engine = engine::InferenceEngine::new(&model_path)?;
-
     let formatted_prompt = match mode {
         Mode::Command => prompt::format_prompt(&input, &app_config.shell),
         Mode::Explain => prompt::format_explain_prompt(&input, &app_config.shell),
         Mode::Answer => prompt::format_answer_prompt(&input),
     };
-
-    let raw_output = engine.generate(&formatted_prompt, 1024)?;
+    let raw_output = engine.generate(&formatted_prompt, MAX_TOKENS)?;
     spinner.finish_and_clear();
 
     let sanitized = output::sanitize_output(&raw_output);
-
     match mode {
-        Mode::Explain | Mode::Answer => {
-            let text = sanitized.trim();
-            if text.is_empty() {
-                eprintln!("Model returned an empty response.");
-                return Ok(());
-            }
-            println!("\n{}", text);
-        }
-        Mode::Command => {
-            let (suggested_cmd, notes) = output::parse_command_output(&sanitized);
-            if suggested_cmd.is_empty() {
-                eprintln!("Model returned an empty response.");
-                return Ok(());
-            }
-
-            println!("\n\x1b[1;32m$ {}\x1b[0m", suggested_cmd);
-
-            if app_config.show_hints && !notes.is_empty() {
-                println!("\x1b[90m{}\x1b[0m", notes.join("\n"));
-            }
-
-            if app_config.auto_copy {
-                match copy_to_clipboard(&suggested_cmd) {
-                    Ok(()) => println!(
-                        "\n\x1b[90m✓ Command copied to clipboard. Press '⌘ + V', then press Enter to run.\x1b[0m"
-                    ),
-                    Err(err) => eprintln!(
-                        "\n\x1b[90mCould not copy to clipboard ({err}). Use the command above.\x1b[0m"
-                    ),
-                }
-            } else {
-                println!(
-                    "\n\x1b[90m✓ Copy or type the command above, then press Enter to run it.\x1b[0m"
-                );
-            }
-        }
+        Mode::Command => print_command(&sanitized, &app_config),
+        Mode::Explain | Mode::Answer => print_prose(&sanitized),
     }
-
     Ok(())
 }
 
-fn copy_to_clipboard(text: &str) -> Result<()> {
-    let mut clipboard = arboard::Clipboard::new().context("failed to access clipboard")?;
-    clipboard
-        .set_text(text.to_owned())
-        .context("failed to copy to clipboard")?;
-    Ok(())
+fn print_prose(sanitized: &str) {
+    let text = sanitized.trim();
+    if text.is_empty() {
+        eprintln!("Model returned an empty response.");
+    } else {
+        println!("\n{text}");
+    }
+}
+
+fn print_command(sanitized: &str, app_config: &AppConfig) {
+    let (command, notes) = output::parse_command_output(sanitized);
+    if command.is_empty() {
+        eprintln!("Model returned an empty response.");
+        return;
+    }
+
+    println!("\n{}", ui::success(format!("$ {command}")));
+    if app_config.show_hints && !notes.is_empty() {
+        println!("{}", ui::dim(notes.join("\n")));
+    }
+
+    if !app_config.auto_copy {
+        println!(
+            "\n{}",
+            ui::dim("✓ Copy or type the command above, then press Enter to run it.")
+        );
+        return;
+    }
+    match ui::copy_to_clipboard(&command) {
+        Ok(()) => println!(
+            "\n{}",
+            ui::dim("✓ Command copied to clipboard. Press '⌘ + V', then press Enter to run.")
+        ),
+        Err(err) => eprintln!(
+            "\n{}",
+            ui::dim(format!(
+                "Could not copy to clipboard ({err}). Use the command above."
+            ))
+        ),
+    }
 }
