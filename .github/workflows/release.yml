@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build-and-release:
-    runs-on: macos-14 # Native Apple Silicon runner
+    runs-on: macos-15 # Native Apple Silicon runner
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
