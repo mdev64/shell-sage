@@ -60,3 +60,10 @@ fn sanitize_preserves_real_content() {
     assert!(out.contains("find . -name '*.mp4'"));
     assert!(out.contains("# matches mp4 files"));
 }
+
+#[test]
+fn parse_skips_markdown_code_fences() {
+    let (cmd, notes) = parse_command_output("```bash\nls -la\n```\n# -l: long format");
+    assert_eq!(cmd, "ls -la");
+    assert_eq!(notes, vec!["# -l: long format"]);
+}

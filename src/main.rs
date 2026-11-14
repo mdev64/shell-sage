@@ -102,23 +102,29 @@ async fn main() -> Result<()> {
     let (mode, input) = cli.into_mode();
 
     let Some(app_config) = config::load_config()? else {
-        eprintln!("{}", ui::warning("No configuration found."));
-        eprintln!("Please run `sage --config` once to pick a model, shell, and preferences.");
+        // Not an error: just guide the user to the one-time setup.
+        println!("{}", ui::warning("Sage isn't configured yet."));
+        println!(
+            "Run {} once to pick a model, shell, and preferences.",
+            ui::bold("sage --config")
+        );
         return Ok(());
     };
 
     let model_config = config::get_model_config(&app_config.model)?;
     let model_path = downloader::prepare_model(model_config).await?;
 
-    let spinner = ui::spinner("Thinking...");
-    let engine = engine::InferenceEngine::new(&model_path)?;
     let formatted_prompt = match mode {
         Mode::Command => prompt::format_prompt(&input, &app_config.shell),
         Mode::Explain => prompt::format_explain_prompt(&input, &app_config.shell),
         Mode::Answer => prompt::format_answer_prompt(&input),
     };
-    let raw_output = engine.generate(&formatted_prompt, MAX_TOKENS)?;
+    let spinner = ui::spinner("Thinking...");
+    let result = engine::InferenceEngine::new(&model_path)
+        .and_then(|engine| engine.generate(&formatted_prompt, MAX_TOKENS));
+    // Clear the spinner before reporting either the answer or an error.
     spinner.finish_and_clear();
+    let raw_output = result?;
 
     let sanitized = output::sanitize_output(&raw_output);
     match mode {

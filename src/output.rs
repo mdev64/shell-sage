@@ -14,12 +14,12 @@ const TURN_TOKENS: [&str; 8] = [
 const ROLE_MARKERS: [&str; 4] = ["user", "model", "assistant", "system"];
 
 /// Splits model output into the command (first non-`#` line) and its
-/// `#`-prefixed notes. Blank lines are ignored.
+/// `#`-prefixed notes. Blank lines and markdown code fences are ignored.
 pub fn parse_command_output(sanitized: &str) -> (String, Vec<&str>) {
     let (notes, rest): (Vec<&str>, Vec<&str>) = sanitized
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
+        .filter(|line| !line.is_empty() && !line.starts_with("```"))
         .partition(|line| line.starts_with('#'));
     let command = rest.first().copied().unwrap_or_default().to_string();
     (command, notes)

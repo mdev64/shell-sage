@@ -25,7 +25,8 @@ pub async fn run_wizard() -> Result<()> {
     println!("\n{}", ui::heading("=== Shell Sage Config ==="));
 
     let model = select_model(&theme)?;
-    downloader::prepare_model(model).await?;
+    let model_path = config::get_model_path(model)?;
+    downloader::ensure_model_exists(model, &model_path).await?;
 
     let shell = select_shell(&theme)?;
     let show_hints = ask_show_hints(&theme)?;
@@ -42,6 +43,9 @@ pub async fn run_wizard() -> Result<()> {
         show_hints,
         auto_copy,
     })?;
+    // Only now that the config points at the new model is it safe to delete
+    // the other one; aborting the wizard earlier must not strand the old config.
+    downloader::remove_other_models(model)?;
 
     println!(
         "\n{} to {}",

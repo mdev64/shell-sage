@@ -18,8 +18,9 @@ const PENALTY_LAST_N: i32 = 64;
 const PENALTY_REPEAT: f32 = 1.1;
 
 pub struct InferenceEngine {
-    backend: LlamaBackend,
+    // Field order is drop order: the model must be freed before the backend.
     model: LlamaModel,
+    backend: LlamaBackend,
 }
 
 impl InferenceEngine {
@@ -27,17 +28,29 @@ impl InferenceEngine {
         llama_cpp_2::send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
         let backend = LlamaBackend::init()?;
         let model = LlamaModel::load_from_file(&backend, model_path, &LlamaModelParams::default())?;
-        Ok(Self { backend, model })
+        Ok(Self { model, backend })
     }
 
     /// Greedily generates a completion for `prompt`, stopping at an
     /// end-of-generation token or once `max_tokens` total positions
     /// (prompt included) have been used.
     pub fn generate(&self, prompt: &str, max_tokens: usize) -> Result<String> {
-        let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(CONTEXT_SIZE));
+        let tokens = self.model.str_to_token(prompt, AddBos::Always)?;
+        // The whole prompt must fit in the context with room left to answer.
+        let limit = max_tokens.min(CONTEXT_SIZE as usize);
+        if tokens.len() >= limit {
+            anyhow::bail!(
+                "Input is too long ({} tokens; the limit is {} including instructions). Please shorten it.",
+                tokens.len(),
+                limit - 1
+            );
+        }
+
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(CONTEXT_SIZE))
+            .with_n_batch(CONTEXT_SIZE);
         let mut ctx = self.model.new_context(&self.backend, ctx_params)?;
 
-        let tokens = self.model.str_to_token(prompt, AddBos::Always)?;
         let mut batch = LlamaBatch::new(CONTEXT_SIZE as usize, 1);
         let last = tokens.len().saturating_sub(1);
         for (i, &token) in tokens.iter().enumerate() {
@@ -54,7 +67,7 @@ impl InferenceEngine {
         let mut output = String::new();
         let mut n_cur = batch.n_tokens();
 
-        while (n_cur as usize) < max_tokens {
+        while (n_cur as usize) < limit {
             let mut candidates =
                 LlamaTokenDataArray::from_iter(ctx.candidates_ith(batch.n_tokens() - 1), false);
             candidates.apply_sampler(&penalty);

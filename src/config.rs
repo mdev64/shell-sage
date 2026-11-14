@@ -12,6 +12,9 @@ pub struct ModelConfig {
     pub summary: &'static str,
     pub download_url: &'static str,
     pub expected_filename: &'static str,
+    /// Exact size of the GGUF file in bytes. Lets Sage verify a cached model
+    /// offline, without asking the server.
+    pub expected_size: u64,
 }
 
 pub const GEMMA_E2B_CONFIG: ModelConfig = ModelConfig {
@@ -19,6 +22,7 @@ pub const GEMMA_E2B_CONFIG: ModelConfig = ModelConfig {
     summary: "faster, lower RAM footprint",
     download_url: "https://models.r2-cf.mdev64.com/gemma4/gemma-4-E2B-it-Q4_K_M.gguf",
     expected_filename: "gemma-4-E2B-it-Q4_K_M.gguf",
+    expected_size: 3_106_738_272,
 };
 
 pub const GEMMA_E4B_CONFIG: ModelConfig = ModelConfig {
@@ -26,6 +30,7 @@ pub const GEMMA_E4B_CONFIG: ModelConfig = ModelConfig {
     summary: "more capable, higher RAM",
     download_url: "https://models.r2-cf.mdev64.com/gemma4/gemma-4-E4B-it-Q4_K_M.gguf",
     expected_filename: "gemma-4-E4B-it-Q4_K_M.gguf",
+    expected_size: 4_977_171_584,
 };
 
 /// Every supported model, smallest first.
